@@ -146,8 +146,7 @@ async def on_ready():
     asyncio.create_task(discovery_loop())
 
 
-@bot.tree.command(name="setchannel", description="Set this channel for match predictions")
-async def setchannel(interaction: discord.Interaction):
+async def check_admin(interaction: discord.Interaction) -> bool:
     member = interaction.user
     if not isinstance(member, discord.Member):
         member = interaction.guild.get_member(interaction.user.id)
@@ -156,45 +155,75 @@ async def setchannel(interaction: discord.Interaction):
                 member = await interaction.guild.fetch_member(interaction.user.id)
             except Exception:
                 member = None
-    if not member or not member.guild_permissions.manage_guild:
+    return member is not None and member.guild_permissions.manage_guild
+
+
+async def post_active_cards(guild_id: str, channel):
+    games = await api.get_all_games(http)
+    now = datetime.now(timezone.utc).timestamp()
+    posted = 0
+    for raw in games:
+        info = api.parse_game(raw)
+        match_id = info["match_id"]
+
+        if info["finished"]:
+            continue
+
+        time_to_kick = info["kickoff"] - now
+        if time_to_kick > POST_BEFORE_KICKOFF_SEC:
+            continue
+
+        existing = await db_mod.get_guild_message(db, guild_id, match_id)
+        if existing:
+            continue
+
+        db_match = await db_mod.get_match(db, match_id)
+        if not db_match:
+            await db_mod.add_match(db, match_id, info["home_team"], info["away_team"],
+                                   get_flag(info["home_team"]), get_flag(info["away_team"]), info["kickoff"])
+            if match_id not in _tracked:
+                _tracked.add(match_id)
+                _lifecycle_tasks[match_id] = asyncio.create_task(match_lifecycle(match_id, info["kickoff"]))
+
+        home_emoji = get_flag(info["home_team"])
+        away_emoji = get_flag(info["away_team"])
+        card = format_vote_card({**info, "home_emoji": home_emoji, "away_emoji": away_emoji})
+        try:
+            msg = await channel.send(card)
+            await msg.add_reaction(home_emoji)
+            await msg.add_reaction(away_emoji)
+            await db_mod.add_guild_message(db, guild_id, match_id, str(channel.id), str(msg.id))
+            posted += 1
+        except Exception as e:
+            log.error(f"Failed to post match {match_id} to guild {guild_id}: {e}")
+
+    return posted
+
+
+@bot.tree.command(name="setchannel", description="Set this channel for match predictions")
+async def setchannel(interaction: discord.Interaction):
+    if not await check_admin(interaction):
         await interaction.response.send_message("\u274c Only server admins can use this command.", ephemeral=True)
         return
     await db_mod.set_guild_channel(db, str(interaction.guild_id), str(interaction.channel_id))
     await interaction.response.send_message("\ud83c\udfaf This channel is now configured for match predictions.")
 
-    guild_id = str(interaction.guild_id)
-    active = await db_mod.get_active_matches(db)
-    now = datetime.now(timezone.utc).timestamp()
-    posted = 0
-    for row in active:
-        match_id = row[0]
-        existing = await db_mod.get_guild_message(db, guild_id, match_id)
-        if existing:
-            continue
-        info = {
-            "match_id": row[0],
-            "home_team": row[1],
-            "away_team": row[2],
-            "home_emoji": row[3],
-            "away_emoji": row[4],
-            "kickoff": row[5],
-            "group": "",
-            "matchday": "?",
-            "type": "group",
-        }
-        home_emoji = row[3]
-        away_emoji = row[4]
-        card = format_vote_card({**info, "home_emoji": home_emoji, "away_emoji": away_emoji})
-        try:
-            msg = await interaction.channel.send(card)
-            await msg.add_reaction(home_emoji)
-            await msg.add_reaction(away_emoji)
-            await db_mod.add_guild_message(db, guild_id, match_id, str(interaction.channel_id), str(msg.id))
-            posted += 1
-        except Exception as e:
-            log.error(f"Failed to post existing match {match_id} to new guild: {e}")
+    posted = await post_active_cards(str(interaction.guild_id), interaction.channel)
     if posted > 0:
-        await interaction.followup.send(f"\u26bd Posted {posted} active match(es) that are currently in progress!")
+        await interaction.followup.send(f"\u26bf Posted {posted} active match(es)!")
+
+
+@bot.tree.command(name="postmatch", description="Post prediction cards for live or upcoming matches")
+async def postmatch(interaction: discord.Interaction):
+    if not await check_admin(interaction):
+        await interaction.response.send_message("\u274c Only server admins can use this command.", ephemeral=True)
+        return
+    await interaction.response.send_message("\ud83d\udd0d Checking for live/upcoming matches...")
+    posted = await post_active_cards(str(interaction.guild_id), interaction.channel)
+    if posted > 0:
+        await interaction.followup.send(f"\u26bf Posted {posted} match(es)!")
+    else:
+        await interaction.followup.send("\u274c No live or upcoming matches found within the next 30 minutes.")
 
 
 async def handle_reaction(payload: discord.RawReactionActionEvent, is_add: bool):
