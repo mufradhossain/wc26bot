@@ -162,6 +162,40 @@ async def setchannel(interaction: discord.Interaction):
     await db_mod.set_guild_channel(db, str(interaction.guild_id), str(interaction.channel_id))
     await interaction.response.send_message("\ud83c\udfaf This channel is now configured for match predictions.")
 
+    guild_id = str(interaction.guild_id)
+    active = await db_mod.get_active_matches(db)
+    now = datetime.now(timezone.utc).timestamp()
+    posted = 0
+    for row in active:
+        match_id = row[0]
+        existing = await db_mod.get_guild_message(db, guild_id, match_id)
+        if existing:
+            continue
+        info = {
+            "match_id": row[0],
+            "home_team": row[1],
+            "away_team": row[2],
+            "home_emoji": row[3],
+            "away_emoji": row[4],
+            "kickoff": row[5],
+            "group": "",
+            "matchday": "?",
+            "type": "group",
+        }
+        home_emoji = row[3]
+        away_emoji = row[4]
+        card = format_vote_card({**info, "home_emoji": home_emoji, "away_emoji": away_emoji})
+        try:
+            msg = await interaction.channel.send(card)
+            await msg.add_reaction(home_emoji)
+            await msg.add_reaction(away_emoji)
+            await db_mod.add_guild_message(db, guild_id, match_id, str(interaction.channel_id), str(msg.id))
+            posted += 1
+        except Exception as e:
+            log.error(f"Failed to post existing match {match_id} to new guild: {e}")
+    if posted > 0:
+        await interaction.followup.send(f"\u26bd Posted {posted} active match(es) that are currently in progress!")
+
 
 async def handle_reaction(payload: discord.RawReactionActionEvent, is_add: bool):
     if payload.user_id == bot.user.id:
