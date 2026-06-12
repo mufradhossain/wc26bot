@@ -22,7 +22,7 @@ DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 CLIENT_ID = os.environ["CLIENT_ID"]
 
 DISCOVERY_INTERVAL = 6 * 60 * 60
-POST_BEFORE_KICKOFF_SEC = 30 * 60
+POST_BEFORE_KICKOFF_SEC = 3 * 60 * 60
 CHECK_AFTER_KICKOFF_SEC = 115 * 60
 LIVE_POLL_INTERVAL = 5 * 60
 
@@ -51,7 +51,7 @@ def format_vote_card(info: dict) -> str:
         f"{info['home_emoji']} **{info['home_team']}**  vs  **{info['away_team']}** {info['away_emoji']}\n"
         f"\ud83d\udcc5 <t:{ts}:F>\n"
         f"\ud83c\udfd4\ufe0f {label} - Matchday {info.get('matchday', '?')}\n\n"
-        f"React with {info['home_emoji']} or {info['away_emoji']} to vote!"
+        f"React with {info['home_emoji']} {info['away_emoji']} or \U0001f91d for a draw!"
     )
 
 
@@ -73,7 +73,9 @@ def format_results(match_row, info, votes) -> str:
 
     home_votes = sum(1 for v in votes if v[4] == "home")
     away_votes = sum(1 for v in votes if v[4] == "away")
-    total = home_votes + away_votes
+    draw_votes = sum(1 for v in votes if v[4] == "draw")
+    total = home_votes + away_votes + draw_votes
+    draw_emoji = "\U0001f91d"
 
     lines = [
         f"\ud83c\udfc1 **MATCH RESULT**",
@@ -85,8 +87,10 @@ def format_results(match_row, info, votes) -> str:
     if total > 0:
         hp = round(home_votes / total * 100)
         ap = round(away_votes / total * 100)
+        dp = round(draw_votes / total * 100)
         lines.append(f"{home_emoji} {home_team}: {home_votes} ({hp}%)")
         lines.append(f"{away_emoji} {away_team}: {away_votes} ({ap}%)")
+        lines.append(f"{draw_emoji} Draw: {draw_votes} ({dp}%)")
     lines.append("")
     lines.append("\ud83c\udfc6 **Predictions:**")
 
@@ -114,16 +118,24 @@ def format_results(match_row, info, votes) -> str:
                 mins_late = int(abs(diff) / 60000)
                 timing = f"\u26a0\ufe0f Voted late! ({mins_late}m after kickoff)"
 
-            if len(picked_teams) == 2:
-                icon = "\U0001f3f3\ufe0f"
-                lines.append(f"{icon} **{username}** voted for BOTH {home_emoji} and {away_emoji} ({timing})")
-            else:
-                picked = picked_teams[0]
-                picked_name = home_team if picked == "home" else away_team
-                picked_emoji = home_emoji if picked == "home" else away_emoji
-                correct = picked == winner
-                icon = "\u2705" if correct else "\u274c"
-                lines.append(f"{icon} **{username}** picked {picked_emoji} {picked_name} ({timing})")
+            picked_labels = []
+            correct = False
+            for p in picked_teams:
+                if p == "home":
+                    picked_labels.append(f"{home_emoji} {home_team}")
+                    if winner == "home":
+                        correct = True
+                elif p == "away":
+                    picked_labels.append(f"{away_emoji} {away_team}")
+                    if winner == "away":
+                        correct = True
+                elif p == "draw":
+                    picked_labels.append(f"{draw_emoji} Draw")
+                    if winner == "draw":
+                        correct = True
+
+            icon = "\u2705" if correct else "\u274c"
+            lines.append(f"{icon} **{username}** picked {' & '.join(picked_labels)} ({timing})")
 
     return "\n".join(lines)
 
@@ -187,11 +199,13 @@ async def post_active_cards(guild_id: str, channel):
 
         home_emoji = get_flag(info["home_team"])
         away_emoji = get_flag(info["away_team"])
+        draw_emoji = "\U0001f91d"
         card = format_vote_card({**info, "home_emoji": home_emoji, "away_emoji": away_emoji})
         try:
             msg = await channel.send(card)
             await msg.add_reaction(home_emoji)
             await msg.add_reaction(away_emoji)
+            await msg.add_reaction(draw_emoji)
             await db_mod.add_guild_message(db, guild_id, match_id, str(channel.id), str(msg.id))
             posted += 1
         except Exception as e:
@@ -244,12 +258,16 @@ async def handle_reaction(payload: discord.RawReactionActionEvent, is_add: bool)
     home_emoji = match_row[3]
     away_emoji = match_row[4]
 
+    DRAW_EMOJI = "\U0001f91d"
+
     team_picked = None
     emoji_str = str(payload.emoji)
     if emoji_str == str(home_emoji):
         team_picked = "home"
     elif emoji_str == str(away_emoji):
         team_picked = "away"
+    elif emoji_str == DRAW_EMOJI:
+        team_picked = "draw"
 
     if not team_picked:
         return
@@ -321,6 +339,7 @@ async def discover_matches():
 async def post_match_card(info: dict):
     home_emoji = get_flag(info["home_team"])
     away_emoji = get_flag(info["away_team"])
+    draw_emoji = "\U0001f91d"
 
     card = format_vote_card({**info, "home_emoji": home_emoji, "away_emoji": away_emoji})
 
@@ -334,6 +353,7 @@ async def post_match_card(info: dict):
             msg = await channel.send(card)
             await msg.add_reaction(home_emoji)
             await msg.add_reaction(away_emoji)
+            await msg.add_reaction(draw_emoji)
             await db_mod.add_guild_message(db, guild_id, info["match_id"], channel_id, str(msg.id))
         except Exception as e:
             log.error(f"Failed to post card to guild {guild_id} channel {channel_id}: {e}")
