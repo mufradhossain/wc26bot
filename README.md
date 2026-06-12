@@ -19,7 +19,7 @@ A Discord bot that lets server members predict World Cup 2026 match winners by r
 
 ## Setup (Server Admin)
 
-1. Click the bot invite link provided by the developer
+1. [Click here to invite the bot to your server](https://discord.com/api/oauth2/authorize?client_id=1515008841853702366&permissions=274877910016&scope=bot%20applications.commands)
 2. Select your server and authorize
 3. Run `/setchannel` in the channel you want predictions posted to
 4. Done — the bot handles everything automatically
