@@ -237,7 +237,7 @@ async def postmatch(interaction: discord.Interaction):
     if posted > 0:
         await interaction.followup.send(f"\u26bf Posted {posted} match(es)!")
     else:
-        await interaction.followup.send("\u274c No live or upcoming matches found within the next 30 minutes.")
+        await interaction.followup.send("\u274c No live or upcoming matches found within the next 3 hours.")
 
 
 async def handle_reaction(payload: discord.RawReactionActionEvent, is_add: bool):
