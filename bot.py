@@ -148,7 +148,15 @@ async def on_ready():
 
 @bot.tree.command(name="setchannel", description="Set this channel for match predictions")
 async def setchannel(interaction: discord.Interaction):
-    if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.manage_guild:
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        member = interaction.guild.get_member(interaction.user.id)
+        if not member:
+            try:
+                member = await interaction.guild.fetch_member(interaction.user.id)
+            except Exception:
+                member = None
+    if not member or not member.guild_permissions.manage_guild:
         await interaction.response.send_message("\u274c Only server admins can use this command.", ephemeral=True)
         return
     await db_mod.set_guild_channel(db, str(interaction.guild_id), str(interaction.channel_id))
