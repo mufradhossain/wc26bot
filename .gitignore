@@ -1,0 +1,6 @@
+.env
+database.db
+__pycache__/
+*.pyc
+test_api.py
+test_result.txt
