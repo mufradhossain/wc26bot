@@ -45,6 +45,10 @@ async def init_db():
         );
     """
     )
+    try:
+        await db.execute("ALTER TABLE matches ADD COLUMN winner TEXT DEFAULT NULL")
+    except Exception:
+        pass
     await db.commit()
     return db
 
@@ -128,4 +132,28 @@ async def remove_vote(db, match_id: str, guild_id: str, user_id: str, team_picke
 
 async def get_votes(db, match_id: str, guild_id: str):
     cursor = await db.execute("SELECT * FROM votes WHERE match_id = ? AND guild_id = ?", (match_id, guild_id))
+    return await cursor.fetchall()
+
+
+async def save_winner(db, match_id: str, winner: str):
+    await db.execute("UPDATE matches SET winner = ? WHERE match_id = ?", (winner, match_id))
+    await db.commit()
+
+
+async def get_matches_needing_winner(db):
+    cursor = await db.execute("SELECT match_id FROM matches WHERE status = 'completed' AND winner IS NULL")
+    rows = await cursor.fetchall()
+    return [row[0] for row in rows]
+
+
+async def get_leaderboard_data(db, guild_id: str):
+    cursor = await db.execute(
+        """
+        SELECT v.match_id, v.user_id, v.username, v.team_picked, m.winner
+        FROM votes v
+        JOIN matches m ON v.match_id = m.match_id
+        WHERE v.guild_id = ? AND m.status = 'completed' AND m.winner IS NOT NULL
+        """,
+        (guild_id,)
+    )
     return await cursor.fetchall()

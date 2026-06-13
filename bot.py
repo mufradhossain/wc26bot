@@ -154,8 +154,32 @@ async def on_ready():
     except Exception as e:
         log.error(f"Failed to sync commands: {e}")
 
+    await backfill_winners()
     await resume_active_matches()
     asyncio.create_task(discovery_loop())
+
+
+async def backfill_winners():
+    try:
+        needing = await db_mod.get_matches_needing_winner(db)
+        if not needing:
+            return
+        games = await api.get_all_games(http)
+        filled = 0
+        for raw in games:
+            info = api.parse_game(raw)
+            if info["match_id"] in needing and info["finished"]:
+                winner = "draw"
+                if info["home_goals"] > info["away_goals"]:
+                    winner = "home"
+                elif info["away_goals"] > info["home_goals"]:
+                    winner = "away"
+                await db_mod.save_winner(db, info["match_id"], winner)
+                filled += 1
+        if filled > 0:
+            log.info(f"Backfilled winners for {filled} match(es)")
+    except Exception as e:
+        log.error(f"Backfill error: {e}")
 
 
 async def check_admin(interaction: discord.Interaction) -> bool:
@@ -238,6 +262,94 @@ async def postmatch(interaction: discord.Interaction):
         await interaction.followup.send(f"\u26bf Posted {posted} match(es)!")
     else:
         await interaction.followup.send("\u274c No live or upcoming matches found within the next 3 hours.")
+
+
+@bot.tree.command(name="leaderboard", description="Show prediction leaderboard for this server")
+async def leaderboard(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    data = await db_mod.get_leaderboard_data(db, str(interaction.guild_id))
+    if not data:
+        await interaction.followup.send("\u274c No completed matches with votes yet.")
+        return
+
+    user_matches: dict[str, dict] = {}
+    for row in data:
+        match_id = row[0]
+        user_id = row[1]
+        username = row[2]
+        team_picked = row[3]
+        winner = row[4]
+
+        if user_id not in user_matches:
+            user_matches[user_id] = {"username": username, "matches": {}}
+        if match_id not in user_matches[user_id]["matches"]:
+            user_matches[user_id]["matches"][match_id] = []
+        user_matches[user_id]["matches"][match_id].append(team_picked)
+
+    scores: dict[str, dict] = {}
+    for user_id, info in user_matches.items():
+        points = 0
+        correct = 0
+        total = 0
+        for match_id, picks in info["matches"].items():
+            total += 1
+            winner = None
+            for row in data:
+                if row[0] == match_id:
+                    winner = row[4]
+                    break
+
+            num_picks = len(picks)
+            has_home = "home" in picks
+            has_away = "away" in picks
+            has_draw = "draw" in picks
+
+            if num_picks == 1:
+                if picks[0] == winner:
+                    points += 2
+                    correct += 1
+            elif num_picks == 2 and not (has_home and has_away):
+                if winner in picks:
+                    points += 1
+                    correct += 1
+
+        scores[user_id] = {
+            "username": info["username"],
+            "points": points,
+            "correct": correct,
+            "total": total,
+        }
+
+    ranked = sorted(scores.items(), key=lambda x: x[1]["points"], reverse=True)
+
+    medals = ["\U0001f947", "\U0001f948", "\U0001f949"]
+    lines = [
+        "\U0001f3c6 **LEADERBOARD**",
+        f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501",
+    ]
+
+    for i, (user_id, s) in enumerate(ranked[:10]):
+        medal = medals[i] if i < 3 else f"`{i+1}.`"
+        acc = round(s["correct"] / s["total"] * 100) if s["total"] > 0 else 0
+        lines.append(f"{medal} **{s['username']}** \u2014 {s['points']} pts ({s['correct']} correct, {acc}%)")
+
+    caller_rank = None
+    for i, (user_id, s) in enumerate(ranked):
+        if user_id == str(interaction.user.id):
+            caller_rank = i + 1
+            break
+
+    if caller_rank and caller_rank > 10:
+        s = scores[str(interaction.user.id)]
+        acc = round(s["correct"] / s["total"] * 100) if s["total"] > 0 else 0
+        lines.append(f"\u2800")
+        lines.append(f"Your rank: **#{caller_rank}** of {len(ranked)} \u2014 {s['points']} pts ({s['correct']} correct, {acc}%)")
+    elif not caller_rank:
+        lines.append(f"\u2800")
+        lines.append(f"You haven't predicted any completed matches yet.")
+
+    await interaction.followup.send("\n".join(lines))
 
 
 async def handle_reaction(payload: discord.RawReactionActionEvent, is_add: bool):
@@ -365,7 +477,7 @@ async def match_schedule(match_id: str, info: dict):
     wait = post_at - now
 
     if wait > 0:
-        log.info(f"Match {match_id}: posting card in {int(wait/60)}m (30m before kickoff)")
+        log.info(f"Match {match_id}: posting card in {int(wait/60)}m (3h before kickoff)")
         await asyncio.sleep(wait)
 
     await post_match_card(info)
@@ -412,7 +524,14 @@ async def publish_result(match_id: str, info: dict):
     if not match_row:
         return
 
-    await db_mod.complete_match(db, match_id)
+    home_score = info["home_goals"]
+    away_score = info["away_goals"]
+    winner = "draw"
+    if home_score is not None and away_score is not None:
+        if home_score > away_score:
+            winner = "home"
+        elif away_score > home_score:
+            winner = "away"
 
     guild_msgs = await db_mod.get_all_guild_messages(db, match_id)
     for gm in guild_msgs:
@@ -425,6 +544,9 @@ async def publish_result(match_id: str, info: dict):
             await channel.send(text)
         except Exception as e:
             log.error(f"Failed to post result for {match_id} in guild {guild_id}: {e}")
+
+    await db_mod.save_winner(db, match_id, winner)
+    await db_mod.complete_match(db, match_id)
 
     _tracked.discard(match_id)
     if match_id in _lifecycle_tasks:
@@ -452,7 +574,36 @@ async def resume_active_matches():
             else:
                 _lifecycle_tasks[match_id] = asyncio.create_task(match_lifecycle(match_id, kickoff))
         else:
+            await check_missing_cards(match_id, row)
             _lifecycle_tasks[match_id] = asyncio.create_task(match_lifecycle(match_id, kickoff))
+
+
+async def check_missing_cards(match_id: str, match_row):
+    guilds = await db_mod.get_all_guilds(db)
+    for guild_id, channel_id in guilds:
+        existing = await db_mod.get_guild_message(db, guild_id, match_id)
+        if existing:
+            continue
+        info = {
+            "match_id": match_id,
+            "home_team": match_row[1],
+            "away_team": match_row[2],
+            "kickoff": match_row[5],
+        }
+        home_emoji = match_row[3]
+        away_emoji = match_row[4]
+        draw_emoji = "\U0001f91d"
+        card = format_vote_card({**info, "home_emoji": home_emoji, "away_emoji": away_emoji})
+        try:
+            channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+            msg = await channel.send(card)
+            await msg.add_reaction(home_emoji)
+            await msg.add_reaction(away_emoji)
+            await msg.add_reaction(draw_emoji)
+            await db_mod.add_guild_message(db, guild_id, match_id, channel_id, str(msg.id))
+            log.info(f"Reposted missing card for match {match_id} in guild {guild_id}")
+        except Exception as e:
+            log.error(f"Failed to repost card for match {match_id} in guild {guild_id}: {e}")
 
 
 if __name__ == "__main__":
