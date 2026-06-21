@@ -169,6 +169,8 @@ async def backfill_winners():
         for raw in games:
             info = api.parse_game(raw)
             if info["match_id"] in needing and info["finished"]:
+                if info["home_goals"] is None or info["away_goals"] is None:
+                    continue
                 winner = "draw"
                 if info["home_goals"] > info["away_goals"]:
                     winner = "home"
@@ -195,7 +197,11 @@ async def check_admin(interaction: discord.Interaction) -> bool:
 
 
 async def post_active_cards(guild_id: str, channel):
-    games = await api.get_all_games(http)
+    try:
+        games = await api.get_all_games(http)
+    except Exception as e:
+        log.error(f"post_active_cards API error: {e}")
+        return
     now = datetime.now(timezone.utc).timestamp()
     posted = 0
     for raw in games:

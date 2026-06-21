@@ -1,3 +1,4 @@
+import asyncio
 import aiohttp
 from datetime import datetime, timezone, timedelta
 
@@ -5,6 +6,13 @@ BASE_URL = "https://worldcup26.ir"
 
 FINISHED = "finished"
 NOT_STARTED = "notstarted"
+
+def _safe_int(val):
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
+
 
 STADIUM_UTC_OFFSET = {
     "1": -6,
@@ -26,12 +34,22 @@ STADIUM_UTC_OFFSET = {
 }
 
 
-async def get_all_games(session: aiohttp.ClientSession) -> list:
+async def get_all_games(session: aiohttp.ClientSession, retries: int = 3) -> list:
     url = f"{BASE_URL}/get/games"
-    async with session.get(url) as resp:
-        data = await resp.json()
-    return data.get("games", [])
-
+    for attempt in range(retries):
+        try:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    raise Exception(f"HTTP {resp.status}")
+                data = await resp.json(content_type=None)
+            return data.get("games", [])
+        except Exception as e:
+            if attempt < retries - 1:
+                wait = (attempt + 1) * 10
+                await asyncio.sleep(wait)
+            else:
+                raise
+    return []
 
 async def get_game(session: aiohttp.ClientSession, game_id: str) -> dict | None:
     games = await get_all_games(session)
@@ -56,8 +74,8 @@ def parse_game(game: dict) -> dict:
         "away_team": game.get("away_team_name_en") or game.get("away_team_label", "TBD"),
         "home_team_id": game["home_team_id"],
         "away_team_id": game["away_team_id"],
-        "home_goals": int(game["home_score"]),
-        "away_goals": int(game["away_score"]),
+        "home_goals": _safe_int(game["home_score"]),
+        "away_goals": _safe_int(game["away_score"]),
         "group": game["group"],
         "matchday": game["matchday"],
         "type": game["type"],
