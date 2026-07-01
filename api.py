@@ -86,6 +86,8 @@ def parse_game(game: dict) -> dict:
         "away_scorers": game.get("away_scorers"),
         "home_label": game.get("home_team_label"),
         "away_label": game.get("away_team_label"),
+        "home_penalty_score": _safe_int(game.get("home_penalty_score")),
+        "away_penalty_score": _safe_int(game.get("away_penalty_score")),
     }
 
 

@@ -40,22 +40,41 @@ _tracked: set[str] = set()
 _lifecycle_tasks: dict[str, asyncio.Task] = {}
 
 
+def determine_winner(info: dict) -> str:
+    home_score = info["home_goals"]
+    away_score = info["away_goals"]
+    if home_score is not None and away_score is not None:
+        if home_score > away_score:
+            return "home"
+        if away_score > home_score:
+            return "away"
+        match_type = info.get("type", "group")
+        if match_type != "group":
+            home_pen = info.get("home_penalty_score")
+            away_pen = info.get("away_penalty_score")
+            if home_pen is not None and away_pen is not None and home_pen != away_pen:
+                return "home" if home_pen > away_pen else "away"
+    return "draw"
+
+
 def format_vote_card(info: dict) -> str:
     ts = info["kickoff"]
     stage = api.format_type(info.get("type", "group"))
     group = info.get("group", "")
     label = f"{stage}" if group.startswith("R") or group in ("QF", "SF", "3RD", "FINAL") else f"Group {group}"
+    is_ko = info.get("type", "group") != "group"
+    draw_line = "" if is_ko else f"\nReact with {info['home_emoji']} {info['away_emoji']} or \U0001f91d for a draw!"
     return (
         f"\u26bd **MATCH PREDICTION**\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{info['home_emoji']} **{info['home_team']}**  vs  **{info['away_team']}** {info['away_emoji']}\n"
         f"\ud83d\udcc5 <t:{ts}:F>\n"
         f"\ud83c\udfd4\ufe0f {label} - Matchday {info.get('matchday', '?')}\n\n"
-        f"React with {info['home_emoji']} {info['away_emoji']} or \U0001f91d for a draw!"
+        f"React with {info['home_emoji']} or {info['away_emoji']} to predict the winner!{draw_line}"
     )
 
 
-def format_results(match_row, info, votes) -> str:
+def format_results(match_row, info, votes, winner=None) -> str:
     home_score = info["home_goals"]
     away_score = info["away_goals"]
     home_team = match_row[1]
@@ -64,12 +83,13 @@ def format_results(match_row, info, votes) -> str:
     away_emoji = match_row[4]
     kickoff = match_row[5]
 
-    winner = "draw"
-    if home_score is not None and away_score is not None:
-        if home_score > away_score:
-            winner = "home"
-        elif away_score > home_score:
-            winner = "away"
+    if winner is None:
+        winner = "draw"
+        if home_score is not None and away_score is not None:
+            if home_score > away_score:
+                winner = "home"
+            elif away_score > home_score:
+                winner = "away"
 
     home_votes = sum(1 for v in votes if v[4] == "home")
     away_votes = sum(1 for v in votes if v[4] == "away")
@@ -155,6 +175,7 @@ async def on_ready():
         log.error(f"Failed to sync commands: {e}")
 
     await backfill_winners()
+    await fix_penalty_winners()
     await resume_active_matches()
     asyncio.create_task(discovery_loop())
 
@@ -171,17 +192,38 @@ async def backfill_winners():
             if info["match_id"] in needing and info["finished"]:
                 if info["home_goals"] is None or info["away_goals"] is None:
                     continue
-                winner = "draw"
-                if info["home_goals"] > info["away_goals"]:
-                    winner = "home"
-                elif info["away_goals"] > info["home_goals"]:
-                    winner = "away"
+                winner = determine_winner(info)
                 await db_mod.save_winner(db, info["match_id"], winner)
                 filled += 1
         if filled > 0:
             log.info(f"Backfilled winners for {filled} match(es)")
     except Exception as e:
         log.error(f"Backfill error: {e}")
+
+
+async def fix_penalty_winners():
+    try:
+        completed_draws = await db_mod.get_completed_draw_matches(db)
+        if not completed_draws:
+            return
+        games = await api.get_all_games(http)
+        fixed = 0
+        for raw in games:
+            info = api.parse_game(raw)
+            mid = info["match_id"]
+            if mid not in completed_draws:
+                continue
+            home_pen = info.get("home_penalty_score")
+            away_pen = info.get("away_penalty_score")
+            if home_pen is not None and away_pen is not None and home_pen != away_pen:
+                winner = "home" if home_pen > away_pen else "away"
+                await db_mod.save_winner(db, mid, winner)
+                fixed += 1
+                log.info(f"Fixed penalty winner for match {mid}: {winner}")
+        if fixed > 0:
+            log.info(f"Fixed {fixed} penalty-decided match(es) that were incorrectly marked as draw")
+    except Exception as e:
+        log.error(f"fix_penalty_winners error: {e}")
 
 
 async def check_admin(interaction: discord.Interaction) -> bool:
@@ -230,12 +272,14 @@ async def post_active_cards(guild_id: str, channel):
         home_emoji = get_flag(info["home_team"])
         away_emoji = get_flag(info["away_team"])
         draw_emoji = "\U0001f91d"
+        is_ko = info.get("type", "group") != "group"
         card = format_vote_card({**info, "home_emoji": home_emoji, "away_emoji": away_emoji})
         try:
             msg = await channel.send(card)
             await msg.add_reaction(home_emoji)
             await msg.add_reaction(away_emoji)
-            await msg.add_reaction(draw_emoji)
+            if not is_ko:
+                await msg.add_reaction(draw_emoji)
             await db_mod.add_guild_message(db, guild_id, match_id, str(channel.id), str(msg.id))
             posted += 1
         except Exception as e:
@@ -458,6 +502,7 @@ async def post_match_card(info: dict):
     home_emoji = get_flag(info["home_team"])
     away_emoji = get_flag(info["away_team"])
     draw_emoji = "\U0001f91d"
+    is_ko = info.get("type", "group") != "group"
 
     card = format_vote_card({**info, "home_emoji": home_emoji, "away_emoji": away_emoji})
 
@@ -471,7 +516,8 @@ async def post_match_card(info: dict):
             msg = await channel.send(card)
             await msg.add_reaction(home_emoji)
             await msg.add_reaction(away_emoji)
-            await msg.add_reaction(draw_emoji)
+            if not is_ko:
+                await msg.add_reaction(draw_emoji)
             await db_mod.add_guild_message(db, guild_id, info["match_id"], channel_id, str(msg.id))
         except Exception as e:
             log.error(f"Failed to post card to guild {guild_id} channel {channel_id}: {e}")
@@ -530,21 +576,14 @@ async def publish_result(match_id: str, info: dict):
     if not match_row:
         return
 
-    home_score = info["home_goals"]
-    away_score = info["away_goals"]
-    winner = "draw"
-    if home_score is not None and away_score is not None:
-        if home_score > away_score:
-            winner = "home"
-        elif away_score > home_score:
-            winner = "away"
+    winner = determine_winner(info)
 
     guild_msgs = await db_mod.get_all_guild_messages(db, match_id)
     for gm in guild_msgs:
         guild_id = gm[0]
         channel_id = gm[2]
         votes = await db_mod.get_votes(db, match_id, guild_id)
-        text = format_results(match_row, info, votes)
+        text = format_results(match_row, info, votes, winner)
         try:
             channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
             await channel.send(text)
@@ -585,6 +624,8 @@ async def resume_active_matches():
 
 
 async def check_missing_cards(match_id: str, match_row):
+    game_data = await api.get_game(http, match_id)
+    match_type = game_data.get("type", "group") if game_data else "group"
     guilds = await db_mod.get_all_guilds(db)
     for guild_id, channel_id in guilds:
         existing = await db_mod.get_guild_message(db, guild_id, match_id)
@@ -595,17 +636,20 @@ async def check_missing_cards(match_id: str, match_row):
             "home_team": match_row[1],
             "away_team": match_row[2],
             "kickoff": match_row[5],
+            "type": match_type,
         }
         home_emoji = match_row[3]
         away_emoji = match_row[4]
         draw_emoji = "\U0001f91d"
+        is_ko = match_type != "group"
         card = format_vote_card({**info, "home_emoji": home_emoji, "away_emoji": away_emoji})
         try:
             channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
             msg = await channel.send(card)
             await msg.add_reaction(home_emoji)
             await msg.add_reaction(away_emoji)
-            await msg.add_reaction(draw_emoji)
+            if not is_ko:
+                await msg.add_reaction(draw_emoji)
             await db_mod.add_guild_message(db, guild_id, match_id, channel_id, str(msg.id))
             log.info(f"Reposted missing card for match {match_id} in guild {guild_id}")
         except Exception as e:

@@ -146,6 +146,12 @@ async def get_matches_needing_winner(db):
     return [row[0] for row in rows]
 
 
+async def get_completed_draw_matches(db):
+    cursor = await db.execute("SELECT match_id FROM matches WHERE status = 'completed' AND winner = 'draw'")
+    rows = await cursor.fetchall()
+    return [row[0] for row in rows]
+
+
 async def get_leaderboard_data(db, guild_id: str):
     cursor = await db.execute(
         """
